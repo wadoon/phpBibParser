@@ -1,108 +1,7 @@
 <?php
-
-class TT {
-    public $name, $regex, $callback;
-    public function __construct($n, $r, $c = null) {
-        $this->name = $n;
-        $this->regex = $r;
-        if($c === null)
-            $this->callback = function ($x) { return $x; };
-        else
-            $this->callback = $c;
-    }
-}
-
-class Token {
-    public $type, $value, $position;
-    public function __construct($n, $v) {
-        $this->type = $n;
-        $this->value = $v;
-    }
-}
-
-class Lexer {
-    public $regex, $tokentypes;
-
-    public function __construct() {
-        $this->tokentypes = func_get_args();
-        $re = array();
-        foreach($this->tokentypes as $t) {
-            $re[] = "(?P<$t->name>$t->regex)";
-        }
-        $this->regex = "/^" . implode("|",$re) . "/Si";
-        #print($this->regex);
-    }
-
-    public function lex($string) {
-        $pos = 0;
-        $tokens = array();
-
-        while($pos < strlen($string)) {
-            $matches = array();
-            $m = preg_match($this->regex, substr($string,$pos), $matches);#, 0, $pos);
-
-            if(!$m)  {
-                // we got a problem, no ruled match
-                echo "no match, pos = $pos\n";
-                echo "residual: ", substr($string, $pos);
-                break;
-            }
-
-            //print_r($matches);
-
-            foreach($this->tokentypes as $t) {
-                if(array_key_exists($t->name, $matches)
-                    && $matches[$t->name] != null
-                ) {
-                    $value = $matches[$t->name];
-
- #                   echo "found: $t->name = '$value'\n";
-                    $cl = $t->callback;
-                    $tokens[] = new Token($t->name,
-                                          $cl($value));
-                    $pos += strlen($value);
-#                    echo "new pos: $pos: >", substr($string, $pos), "<\n";
-                    break;
-                }
-            }
-        }
-        return $tokens;
-    }
-}
-
-
-$lexer = new Lexer(
-    new TT("number", "\\d+"),
-    new TT("q", "[q]"),
-    new TT("ws", "[ ]+")
-);
-
-#print_r($lexer->lex("16161 q 16161"));
-
-# A rough grammar (case-insensitive):
-#
-# Database  ::= (Junk '@' Entry)*
-# Junk      ::= .*?
-# Entry ::= Record
-#       |   Comment
-#       |   String
-#       |   Preamble
-# Comment   ::= "comment" [^\n]* \n     -- ignored
-# String    ::= "string" '{' Field* '}'
-# Preamble  ::= "preamble" '{' .* '}'   -- (balanced)
-# Record    ::= Type '{' Key ',' Field* '}'
-#       |   Type '(' Key ',' Field* ')' -- not handled
-# Type  ::= Name
-# Key   ::= Name
-# Field ::= Name '=' Value
-# Name      ::= [^\s\"#%'(){}]*
-# Value ::= [0-9]+
-#       |   '"' ([^'"']|\\'"')* '"'
-#       |   '{' .* '}'          -- (balanced)
-
-
-define("T_IDENTIFIER", "/^[^\s\"#%'(){},=]*/");
-define("T_QUOTED", "/^\"([^\"]|\\\")*\"/");
+define('T_BIBCOMMENT', '/#.*\n/i');
+define("T_IDENTIFIER", "/^[^\\s\"#%'(){},=]+/i");
+define("T_QUOTED", "/^\"([^\"]|\\\")*\"/i");
 define("T_COMMENT_", "/^@comment/i");
 define("T_STRING_", "/^@string/i");
 define("T_PREAMBLE", "/^@preamble/i");
@@ -113,172 +12,227 @@ define("T_OPEN", "/^{/");
 define("T_COMMA", "/^,/");
 define("T_EQUAL", "/^=/");
 
-class BibtexParser {
-    // Lexer functions
-    public $text, $pos;
+class BibtexParser
+{
+    public $text;
 
-    public function skipWhitespace() {
-        while($this->pos < strlen($this->text)) {
-            $c = $this->cchar();
-            if($c == ' ' || $c =="\n" || $c == "\t")
-                $this->pos++;
-            else
-                break;
+    //public $pos;
+
+    public function __construct($content)
+    {
+        $this->text = $content;
+        //$this->pos = 0;
+    }
+
+    /**
+     * consumes all whitespace
+     */
+    public function skipWhitespace()
+    {
+        $c = $this->cchar();
+        if ($c == ' ' || $c == "\n" || $c == "\t" || $c == "\f") {
+            $matches = array();
+            if (preg_match("/^[ \n\t\f]+/", $this->text, $matches)) {
+                $this->forward(strlen($matches[0]));
+            }
         }
     }
 
-    public function lookat($regex) {
-        $this->skipWhitespace();
-        $matches = array();
-        $m = preg_match($regex, substr($this->text,$this->pos), $matches);#, 0, $pos);
-        //echo "r: $regex => $matches[0]\n";
 
-        if(!$m) return false;
-        else return $matches[0];
+    private $lastRegex = false;
+    private $lastMatch = array();
+
+    private function forward($n)
+    {
+        $this->text = substr($this->text, $n);
+        $this->lastRegex = false;
     }
 
-    public function mc($regex){
+    /**
+     * returns true, if we the current residual string matches the given regex.
+     * @param $regex
+     * @return bool
+     */
+    public function lookat($regex)
+    {
+        if ($this->lastRegex === $regex) {
+            return $this->lastMatch[0];
+        }
+
+        $this->skipWhitespace();
+        $this->lastRegex = $regex;
+        $m = preg_match($regex, $this->text, $this->lastMatch);
+        if (!$m) return false;
+        else return $this->lastMatch[0];
+    }
+
+    /**
+     * match current regex at position
+     * @param $regex
+     * @return bool
+     * @throws Exception
+     */
+    public function mc($regex)
+    {
         $v = $this->lookat($regex);
-        if($v) {
-            $this->pos += strlen($v);
+        if ($v) {
+            $this->forward(strlen($v));
             return $v;
         } else {
-            throw new Exception("try to match $regex without success, current character '".
-                                $this->cchar() ."' @$this->pos, Residual: " . substr($this->text, $this->pos, 100));
+            throw new Exception("try to match $regex without success, current character '" .
+                $this->cchar() . "'Residual: " . substr($this->text, 0, 100));
         }
     }
 
-    public function consumeUntil($tok) {
+    public function consumeUntil($tok)
+    {
         $regex = "/(.*)$tok/";
         return $this->mc($regex);
     }
 
 
-    public function cchar() {
-        return $this->text[$this->pos];
+    public function cchar()
+    {
+        if (strlen($this->text) == 0) return '';
+        return $this->text[0];
     }
+
     //***********************************************************************************
 
+    public $stringEntries = array();
+    public $entries = array();
 
-    function Database() {
-        while($this->lookat(T_COMMENT_) ||
-              $this->lookat(T_PREAMBLE) ||
-              $this->lookat(T_STRING_) ||
-              $this->lookat(T_RECORD)) {
-            $this->Entry();
-        }
+    function Database()
+    {
+        do {
+            if ($this->lookat(T_COMMENT_)) {
+                $this->Comment();
+            } else if ($this->lookat(T_PREAMBLE)) {
+                $this->Preamble();
+            } else if ($this->lookat(T_STRING_)) {
+                $this->String();
+            } else if ($this->lookat(T_RECORD)) {
+                $this->Record();
+            } else {
+                break;
+                //throw new Exception("no match: residual:" . substr($this->text, $this->pos, 100));
+            }
+        } while (true);
     }
 
-    function Entry() {
-        if($this->lookat(T_COMMENT_)) {
-            $this->Comment();
-        } else if($this->lookat(T_PREAMBLE)) {
-            $this->Preamble();
-        } else if($this->lookat(T_STRING_)) {
-            $this->String();
-        } else if($this->lookat(T_RECORD)) {
-            $this->Record();
-        } else {
-            throw new Exception("no match: residual:". substr( $this->text, $this->pos, 100));
-        }
-    }
-
-    function Comment() {
+    function Comment()
+    {
+        //@COMMENT dsfdsafdsajflsajflasjfl
+        //@COMMENT fdsfdsfasfdsaf
         $this->mc(T_COMMENT_);
+        //$this->mc(T_OPEN);
         $this->consumeUntil("\n");
+        //$this->mc(T_CLOSE);
     }
 
-    function String() {
+    function String()
+    {
         $this->mc(T_STRING_);
         $this->mc(T_OPEN);
-        $this->Fields();
+        $fields = $this->Fields();
         $this->mc(T_CLOSE);
+
+        $this->stringEntries = array_merge($this->stringEntries, $fields);
     }
 
-    function Preamble() {
+    function Preamble()
+    {
         $this->mc(T_PREAMBLE);
         $this->curlyText(); // need to matching
     }
 
-    function Record() {
+    function Record()
+    {
+        $this->currentEntry = array();
         $this->mc(T_RECORD);
         $this->mc(T_OPEN);
         $value = $this->mc(T_IDENTIFIER);
         $this->mc(T_COMMA);
-        $this->Fields();
+        $fields = $this->Fields();
+        $this->mc(T_CLOSE);
+        $this->entries[$value] = $fields;
     }
 
-    function Fields(){
+    function Fields()
+    {
         $f = array();
-
-        do {
-            if($this->lookat(T_CLOSE)) {
+        $prefix = "";
+        while ($this->lookat(T_IDENTIFIER)) {
+            /*if ($this->lookat(T_CLOSE)) {
                 $this->mc(T_CLOSE);
                 break;
-            }
-            $f[] = $this->Field();
-
-            if($this->lookat(T_COMMA))
+            }*/
+            $a = $this->Field();
+            $f[$prefix . $a[0]] = $a[1];
+            if ($this->lookat(T_COMMA))
                 $this->mc(T_COMMA);
-            else
-                break;
-
-        } while(true);
-        #print_r($f);
+            if ($this->lookat("/^%(SNIP|--)/i")) {
+                $prefix = "_";
+                $this->mc("/^%(SNIP|--)/i");
+            }
+        }
         return $f;
     }
 
-    function Field() {
+    function Field()
+    {
         $name = $this->mc(T_IDENTIFIER);
         $this->mc(T_EQUAL);
         $value = $this->Value();
         return array($name, $value);
     }
 
-    function Value() {
-        if($this->lookat(T_NUMBER)) {
+    function Value()
+    {
+        if ($this->cchar() == ',')
+            return "";
+        elseif ($this->lookat(T_NUMBER)) {
             return $this->mc(T_NUMBER);
-        } else if ($this->lookat(T_QUOTED)) {
+        } elseif ($this->lookat(T_QUOTED)) {
             return $this->mc(T_QUOTED);
-        } else if($this->lookat(T_OPEN)) {
+        } elseif ($this->lookat(T_OPEN)) {
             return $this->curlyText();
-        } else if($this->lookat(T_IDENTIFIER)){
-            return $this->mc(T_IDENTIFIER);
+        } elseif ($this->lookat(T_IDENTIFIER)) {
+            $id = $this->mc(T_IDENTIFIER);
+            while ($this->lookat("/^#/"))
+                $this->mc("/^#/");
+            return $this->stringEntries[$id] . $this->Value();
         } else {
             throw new Exception("no match for value");
         }
     }
 
-    function curlyText() {
-        //        $this->loo(T_OPEN);
+    function curlyText()
+    {
+        //$this->loo(T_OPEN);
         $counter = 0;
-        $start = $this->pos;
+        $start = 0;
         do {
-            $c = $this->cchar();
-            switch($c)
-            {
-            case '{': $counter++; break;
-            case '}': $counter--; break;
+            $c = $this->text[$start];
+            switch ($c) {
+                case '{':
+                    $counter++;
+                    break;
+                case '}':
+                    $counter--;
+                    break;
             }
-#            print "C: $counter , $c\n";
-            $this->pos++;
-        }while($counter > 0);
-        $end = $this->pos;
-        $t =  substr( $this->text, $start+1, ($end - $start -2));
+            #print "C: $counter , $c\n";
+            $start++;
+        } while ($counter > 0);
+        $t = substr($this->text, 0, $start);
+        $this->forward($start);
         return $t;
     }
 }
 
-function remove_comments($text) {
-    return preg_replace("/#[^\n,]*(?=,|\n)/", "", $text);
+
+function remove_comments($text)
+{
+    return preg_replace("/%[^\n,]*(?=,|\n)/", "", $text);
 }
-
-$b = new BibtexParser();
-$b->pos = 0;
-$b->text = remove_comments(file_get_contents("test.bib"));
-$b->ilexer = $lexer;
-
-$b->Database();
-
-
-?>
